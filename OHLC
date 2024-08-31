@@ -1,0 +1,74 @@
+import requests
+import pandas as pd
+import urllib.parse
+from datetime import datetime, timedelta
+import pytz  # Make sure to install pytz for timezone handling
+from IPython.display import display, HTML  # Import display functions
+from concurrent.futures import ThreadPoolExecutor, as_completed  # Import threading utilities
+
+# Set timezone
+TIME_ZONE = pytz.timezone('Asia/Kolkata')
+
+def getHistoricalData(symInfo):
+    res = None
+    try:
+        parseInstrument = urllib.parse.quote(symInfo['ISIN Number'])  # Assuming the ISIN is the instrument key
+        fromDate = (datetime.now(TIME_ZONE) - timedelta(days=100)).strftime("%Y-%m-%d")
+        toDate = datetime.now(TIME_ZONE).strftime("%Y-%m-%d")
+
+        # Request 1-minute data
+        url = f'https://api.upstox.com/v2/historical-candle/{parseInstrument}/1minute/{toDate}/{fromDate}'
+
+        res = requests.get(url, headers={'Accept': 'application/json'}, params={}, timeout=5.0)
+        candleRes = res.json()
+
+        if 'data' in candleRes and 'candles' in candleRes['data'] and candleRes['data']['candles']:
+            candleData = pd.DataFrame(candleRes['data']['candles'])
+            candleData.columns = ['date', 'open', 'high', 'low', 'close', 'vol', 'oi']
+            candleData = candleData[['date', 'open', 'high', 'low', 'close']]
+            candleData['date'] = pd.to_datetime(candleData['date']).dt.tz_convert('Asia/Kolkata')
+            candleData['symbol'] = symInfo['Symbol Name']  # Include Symbol Name
+
+            # Filter out data before 9:15 AM
+            candleData = candleData[candleData['date'].dt.time >= datetime.strptime('09:15', '%H:%M').time()]
+
+            # Resample to 15-minute intervals
+            candleData.set_index('date', inplace=True)
+            candleData_15m = candleData.resample('15T').agg({
+                'open': 'first',
+                'high': 'max',
+                'low': 'min',
+                'close': 'last'
+            }).dropna().reset_index()
+
+            candleData_15m['symbol'] = symInfo['Symbol Name']  # Include Symbol Name in resampled data
+
+            return candleData_15m
+        else:
+            print('No data', symInfo['ISIN Number'], candleRes)
+    except Exception as e:
+        print(f'Error in data fetch for {symInfo["ISIN Number"]}: {res} {e}')
+
+    return None
+
+# Load ISIN data from CSV file
+isin_data = pd.read_csv('isin_data.csv')
+
+# Initialize the list to store candle data
+candledfList = []
+
+# Use ThreadPoolExecutor to fetch data concurrently
+with ThreadPoolExecutor(max_workers=10) as executor:  # Adjust max_workers as needed
+    futures = {executor.submit(getHistoricalData, isin_data.loc[i]): i for i in isin_data.index[:50]}  # Adjust as needed
+    for future in as_completed(futures):
+        res = future.result()  # Get the result from the future
+        if res is not None:  # Check if data is returned
+            candledfList.append(res)  # Append to the list
+
+# Optionally, you can concatenate all DataFrames in candledfList into a single DataFrame
+if candledfList:
+    finalCandleData = pd.concat(candledfList, ignore_index=True)
+    # Display the final DataFrame as an IPython table
+    display(HTML(finalCandleData.to_html(index=False)))  # Display as HTML table
+else:
+    print("No data was retrieved.")
